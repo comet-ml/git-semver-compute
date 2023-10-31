@@ -40,7 +40,7 @@ Easily make the current version available in your Makefile like so:
 VERSION ?= $(shell ./.version/calculate-version.sh)
 
 $(EXECUTABLE):
-	go build -ldflags="-extldflags=-static -X main.Version=$(VERSION)" -o $(EXECUTABLE) .
+  go build -ldflags="-X main.Version=$(VERSION)" -o $(EXECUTABLE) .
 ```
 
 ### Github Actions
