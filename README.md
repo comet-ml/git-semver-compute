@@ -38,6 +38,9 @@ Easily make the current version available in your Makefile like so:
 # Use the ?= to allow the version to be overriden easily by passing it in as
 # an environment or build variable.
 VERSION ?= $(shell ./.version/calculate-version.sh)
+
+$(EXECUTABLE):
+	go build -ldflags="-extldflags=-static -X main.Version=$(VERSION)" -o $(EXECUTABLE) .
 ```
 
 ### Github Actions
