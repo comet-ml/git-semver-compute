@@ -21,3 +21,35 @@ tracked files, the diff will be hashed and added to the metadata.
 
 Tags which begin with a 'v' will have it removed when evaluating the tag as a
 version.
+
+## Usage
+
+Add it to your project as a submodule:
+
+```bash
+git submodule add https://gitlab.com/CRThaze/git-semver-compute.git .version
+```
+
+### Makefile
+
+Easily make the current version available in your Makefile like so:
+
+```make
+# Use the ?= to allow the version to be overriden easily by passing it in as
+# an environment or build variable.
+VERSION ?= $(shell ./.version/calculate-version.sh)
+```
+
+### Github Actions
+
+```yaml
+on: [push]
+jobs:
+  build:
+    steps:
+      - name: Compute SemVer from Tags and Commits
+        id: version
+        run: echo "VERSION=$(${PWD}/.version/calculate-version.sh)" >> $GITHUB_OUTPUT
+      - name: Create Archive
+        run: tar -czf mycode-${{ steps.version.outputs.VERSION }}.tar.gz .
+```
