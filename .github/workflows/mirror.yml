@@ -5,7 +5,7 @@ on:
         - __mirror
   schedule:
     # Run everyday at 3 AM UTC
-    - cron: '0 3 * * *'
+    - cron: '0 10 * * 1'
   workflow_dispatch:
 
 jobs:
@@ -17,5 +17,5 @@ jobs:
         id: mirror
         uses: bridgelightcloud/github-mirror-action@v3
         with:
-          origin: ''
+          origin: 'https://git.sdf.org/CRThaze/git-semver-compute.git'
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
