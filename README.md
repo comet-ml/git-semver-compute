@@ -27,7 +27,7 @@ version.
 Add it to your project as a submodule:
 
 ```bash
-git submodule add https://gitlab.com/CRThaze/git-semver-compute.git .version
+git submodule add https://git.sdf.org/CRThaze/git-semver-compute.git .version
 ```
 
 ### Makefile
