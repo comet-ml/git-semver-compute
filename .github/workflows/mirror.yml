@@ -25,7 +25,7 @@ jobs:
     steps:
       - name: Mirror upstream branches + tags (preserving __mirror)
         env:
-          UPSTREAM: https://git.sdf.org/CRThaze/git-semver-compute.git
+          UPSTREAM: https://codeberg.org/CRThaze/git-semver-compute.git
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
