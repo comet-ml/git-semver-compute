@@ -1,21 +1,44 @@
-name: 'mirror'
+name: mirror
+
+# NOTE: this workflow lives on the __mirror branch, which must remain the
+# repository's DEFAULT branch. GitHub only runs `schedule` and
+# `workflow_dispatch` workflows from the default branch, and the mirror must
+# live on a branch that upstream never overwrites (upstream has no such
+# workflow, so any mirrored branch would lose it).
 on:
-  push:
-    branches:
-        - __mirror
   schedule:
-    # Run everyday at 3 AM UTC
-    - cron: '0 10 * * 1'
+    - cron: '0 3 * * *'   # every day at 03:00 UTC
   workflow_dispatch:
+  push:
+    branches: [__mirror]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror
+  cancel-in-progress: false
 
 jobs:
   mirror:
     runs-on: ubuntu-latest
-    name: mirror
     steps:
-      - name: mirror
-        id: mirror
-        uses: bridgelightcloud/github-mirror-action@v3
-        with:
-          origin: 'https://git.sdf.org/CRThaze/git-semver-compute.git'
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Mirror upstream branches + tags (preserving __mirror)
+        env:
+          UPSTREAM: https://git.sdf.org/CRThaze/git-semver-compute.git
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Bare clone of upstream: all heads + tags, no working tree.
+          git clone --bare "$UPSTREAM" upstream.git
+          cd upstream.git
+
+          # Push ONLY upstream's branches and tags to this repo, force-updating
+          # so we follow any upstream history rewrite. We do not pass
+          # --mirror/--prune, so this repo's own __mirror branch is never
+          # touched or deleted.
+          git push --force \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            'refs/heads/*:refs/heads/*' \
+            'refs/tags/*:refs/tags/*'
