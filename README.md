@@ -3,7 +3,7 @@
 This `__mirror` branch holds **only** the automation that keeps this GitHub
 repository mirrored from its upstream:
 
-> https://git.sdf.org/CRThaze/git-semver-compute
+> https://codeberg.org/CRThaze/git-semver-compute
 
 It is the repository's **default branch on purpose**. GitHub only runs
 `schedule` / `workflow_dispatch` workflows from the default branch, and the
