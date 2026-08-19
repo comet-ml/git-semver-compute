@@ -1,28 +1,40 @@
 #!/bin/sh
 
+########################
+### Pseudo Constants ###
+########################
+
 # RegEx source:
 # https://web.archive.org/web/20221230095605/https://semver.org/#is-there-a-suggested-regular-expression-regex-to-check-a-semver-string
 SEMVER_REGEX='^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)(?:-(?P<prerelease>(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+(?P<buildmetadata>[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$'
+
+###############
+### Globals ###
+###############
 
 # Prefixes tolerated in front of a semantic version when scanning tags. Comma-
 # separated and overridable with --tolerate-prefix; defaults to 'v' (e.g.
 # v1.2.3). Matching is case-insensitive and the prefix is stripped from output.
 TOLERATE_PREFIX="v"
 
-# When --oci is given, the '+' build-metadata separator (which OCI image tags
+# When --oci is used, the '+' build-metadata separator (which OCI image tags
 # disallow) is replaced in the output. OCI_PLUS is the replacement string,
 # defaulting to '_' and overridable via --oci=SEP (e.g. --oci=--).
 OCI_MODE=0
 OCI_PLUS="_"
 
-# When --preserve-metadata is given, build metadata ('+...') on the nearest tag
+# When --preserve-metadata is used, build metadata ('+...') on the nearest tag
 # is carried onto `next` output instead of being stripped. Only affects `next`.
 PRESERVE_METADATA=0
 
-# When --add-metadata=META is given, META is appended to the output's build
+# When --add-metadata=META is used, META is appended to the output's build
 # metadata in any mode (starting a '+' section if there is none). Empty means
 # nothing to add.
 ADD_METADATA=""
+
+# When --full-tags is used, the `history` subcommand prints raw tag names
+# (prefix and metadata intact) instead of prefix-stripped versions.
+FULL_TAGS=0
 
 ###############
 ### Helpers ###
@@ -43,7 +55,7 @@ println_err() {
 }
 
 usage() {
-	println "Usage: $(basename "$0") [--tolerate-prefix=LIST] [--oci[=SEP]] [--preserve-metadata] [--add-metadata=META] [next major|minor|patch|prerelease [bump] [label] | base]"
+	println "Usage: $(basename "$0") [--tolerate-prefix=LIST] [--oci[=SEP]] [--preserve-metadata] [--add-metadata=META] [--full-tags] [next major|minor|patch|prerelease [bump] [label] | base | history]"
 }
 
 usage_err() {
@@ -68,16 +80,18 @@ die() {
 ### Pure String Helpers ###
 ###########################
 
-# Echo the longest tolerated prefix that a given string (tag name) starts with
-# (matched case-insensitively), preserving the tag's original casing, or
+# Return the longest tolerated prefix that a given string (tag name) starts
+# with (matched case-insensitively), preserving the tag's original casing, or
 # nothing if none matches.
 # The tolerated prefixes come from the comma-separated TOLERATE_PREFIX list.
 tolerated_prefix() {
-	local tag=$1
-	local best=""
-	local prefix_list=$TOLERATE_PREFIX
-	local tag_lower=$(printf '%s' "$tag" | tr '[:upper:]' '[:lower:]')
-	local prefix prefix_lower
+	local \
+		tag=$1 \
+		best="" \
+		prefix_list=$TOLERATE_PREFIX \
+		tag_lower=$(print "$tag" | tr '[:upper:]' '[:lower:]') \
+		prefix \
+		prefix_lower
 
 	while [ -n "$prefix_list" ]
 	do
@@ -117,7 +131,7 @@ tolerated_prefix() {
 	print "$best"
 }
 
-# Echo the tag with any tolerated prefix stripped.
+# Return the tag with any tolerated prefix stripped.
 strip_prefix() {
 	local prefix
 	prefix=$(tolerated_prefix "$1")
@@ -130,7 +144,7 @@ is_semver() {
 	println "$(strip_prefix "$1")" | perl -ne "/$SEMVER_REGEX/ && (\$found=1); END {exit !\$found}"
 }
 
-# Echo the input with every '+' replaced by OCI_PLUS, for OCI-tag-compatible
+# Return the input with every '+' replaced by OCI_PLUS, for OCI-tag-compatible
 # output (OCI image tags disallow '+').
 oci_encode() {
 	local in=$1
@@ -144,9 +158,9 @@ oci_encode() {
 	print "$out$in"
 }
 
-# Echo $1 with build metadata $2 attached: start a '+' section if there is none,
-# otherwise append with '-' (the same separator convention as the build-version
-# metadata). Uses '+' regardless of --oci; the OCI pass runs afterward.
+# Return $1 with build metadata $2 attached: start a '+' section if there is
+# none, otherwise append with '-' (the same separator convention as the
+# build-version metadata).
 inject_metadata() {
 	case "$1" in
 		*+*) print "$1-$2" ;;
@@ -154,7 +168,7 @@ inject_metadata() {
 	esac
 }
 
-# Echo the SHA-1 of stdin, using whichever digest tool is available (GNU
+# Return the SHA-1 of stdin, using whichever digest tool is available (GNU
 # coreutils, BSD/macOS, or OpenSSL).
 sha1() {
 	if command -v sha1sum >/dev/null 2>&1
@@ -168,18 +182,23 @@ sha1() {
 	fi
 }
 
-# Echo the numeric core bumped by the given level, dropping any pre-release.
+# Return the numeric core bumped by the given level, dropping any pre-release.
 bump_core_version() {
+	# $1=level, $2=major, $3=minor, $4=patch.
 	# When bumpting each component, the smaller components go to zero.
+	local \
+		major=$2 \
+		minor=$3 \
+		patch=$4
 	case "$1" in
 		major)
-			println "$((MAJOR + 1)).0.0"
+			println "$((major + 1)).0.0"
 			;;
 		minor)
-			println "$MAJOR.$((MINOR + 1)).0"
+			println "$major.$((minor + 1)).0"
 			;;
 		patch)
-			println "$MAJOR.$MINOR.$((PATCH + 1))"
+			println "$major.$minor.$((patch + 1))"
 			;;
 	esac
 }
@@ -211,15 +230,7 @@ is_prerelease_downgrade() {
 ### Argument Parsing ###
 ########################
 
-# Parse the command line, setting MODE / BUMP / LABEL and, if the
-# --tolerate-prefix option is present, TOLERATE_PREFIX.
-# Usage:
-#   calculate-version.sh                                Current build version.
-#   calculate-version.sh base                           Nearest semver tag.
-#   calculate-version.sh next major|minor|patch         Next release version.
-#   calculate-version.sh next prerelease [bump] [label] Next pre-release version.
-# The --tolerate-prefix=LIST option may appear anywhere and overrides the set of
-# prefixes tolerated in front of a semver tag (default 'v').
+# Parse the command line, setting globals based on arguments.
 parse_args() {
 	MODE=""
 	BUMP=""
@@ -274,6 +285,10 @@ parse_args() {
 				ADD_METADATA=$1
 				shift
 				;;
+			--full-tags)
+				FULL_TAGS=1
+				shift
+				;;
 			*)
 				# Found something that is not a known non-positional arg.
 				# Rotate it to the end of the args (after the sentinel).
@@ -298,6 +313,15 @@ parse_args() {
 			if [ -n "$2" ]
 			then
 				die_usage "'base' takes no extra arguments."
+			fi
+			;;
+		### History ###
+		# List all ancestor semver tags
+		history)
+			MODE="history"
+			if [ -n "$2" ]
+			then
+				die_usage "'history' takes no extra arguments."
 			fi
 			;;
 		### Next ###
@@ -366,53 +390,42 @@ parse_args() {
 ### Tag Resolution ###
 ######################
 
-# Resolve the most recent valid semantic-version tag into TAG, rewinding
-# through history past any non-semver tags.
-# Falls back to 0.0.0 when none is found.
+# Return the most recent valid semantic-version tag reachable from HEAD.
+# Rewinds through history past any non-semver tags.
+# Returns 0.0.0 when none is found.
 resolve_tag() {
+	local tag
+
 	# Describe tag does something very similar to what we want already.
 	# However it doesn't discrimate between semver compatible tags and not.
 	# Here we use --abbrev=0 to strip the commit distance (-1-gffff), so we're
 	# grabbing the nearest tag of any type first.
-	TAG=$(git describe --tags --abbrev=0 2>/dev/null)
+	tag=$(git describe --tags --abbrev=0 2>/dev/null)
 
 	# If there are no tags, use 0.0.0
-	if [ -z "$TAG" ]
+	if [ -z "$tag" ]
 	then
-		TAG=0.0.0
+		println 0.0.0
+		return
 	fi
 
-	# If the most recent tag is not a valid semantic version, rewind until we
-	# find one.
-	while ! is_semver "$TAG"
+	# If the nearest tag is not a valid semantic version, rewind to the
+	# next-nearest tag.
+	# Each step moves strictly backward past a tag, so this always terminates.
+	# If we run out of tags we fall back to 0.0.0.
+	while ! is_semver "$tag"
 	do
-		local tag_hash
-		local previous_tag_hash
-
-		# Get the hash for the most recent tag.
-		tag_hash=$(git rev-list -n 1 "$TAG")
-
-		# Get the hash for the commit before the latest tag.
-		previous_tag_hash=$(git rev-list "$tag_hash" | sed '2q;d')
-
-		# Rewind commits to the previous tag commit.
-		while git describe --tags "$previous_tag_hash" 2>/dev/null \
-			| perl -ne \
-				'/.+?-\d+-g[[:xdigit:]]{7}$/ && ($found=1); END {exit !$found}'
-		do
-			tag_hash=$previous_tag_hash
-			previous_tag_hash=$(git rev-list "$tag_hash" | sed '2q;d')
-			# If we've reached the beginning of the commit history, break out of
-			# the loop. This should never happen.
-			if [ -z "$previous_tag_hash" ]
-			then
-				break
-			fi
-		done
-		# Get the tag, or return 0.0.0 if there are no tags or if we've reached
-		# the end of the commit history.
-		TAG=$(git describe --tags "$previous_tag_hash" --abbrev=0 2>/dev/null || printf '%s\n' 0.0.0)
+		local tag_commit
+		tag_commit=$(git rev-list -n 1 "$tag")
+		tag=$(git describe --tags --abbrev=0 "$tag_commit^" 2>/dev/null)
+		if [ -z "$tag" ]
+		then
+			println 0.0.0
+			return
+		fi
 	done
+
+	println "$tag"
 }
 
 
@@ -420,15 +433,24 @@ resolve_tag() {
 ### Version parsing ###
 #######################
 
-# Parse a prefix-stripped version into MAJOR / MINOR / PATCH / PRE_BODY and,
-# if a pre-release is present, CUR_LABEL / CUR_COUNTER.
+# Parse version with the prefix stripped and return the pipe-joined record
+# "major|minor|patch|pre_body|cur_label|cur_counter|meta". Returns nothing if
+# the input is not a parseable semantic version (the caller validates).
 parse_version() {
-	local counter
-	local parsed
-	local build_meta
+	local \
+		counter \
+		parsed \
+		build_meta \
+		major \
+		minor \
+		patch \
+		pre_body \
+		cur_label \
+		cur_counter \
+		meta
 
 	# Decompose with the canonical SemVer regex — the same definition used to
-	# validate the tag — so extraction cannot disagree with validation. The
+	# validate the tag; so extraction cannot disagree with validation. The
 	# named capture groups yield major/minor/patch/prerelease/buildmetadata,
 	# joined with '|'; the optional groups come back empty.
 	parsed=$(print "$1" | SEMVER_REGEX="$SEMVER_REGEX" perl -ne '
@@ -438,36 +460,39 @@ parse_version() {
 		}')
 	if [ -z "$parsed" ]
 	then
-		die "base tag '$TAG' is not a parseable semantic version."
+		return
 	fi
-	IFS='|' read -r MAJOR MINOR PATCH PRE_BODY build_meta <<-EOF
+	# Bind parsed results to local variables.
+	IFS='|' read -r major minor patch pre_body build_meta <<-HERE
 	$parsed
-	EOF
+	HERE
 
-	# Build metadata is captured in META so --preserve-metadata can re-attach it.
-	META=${build_meta:+"+$build_meta"}
+	# Build metadata is carried in meta so --preserve-metadata can re-attach it.
+	meta=${build_meta:+"+$build_meta"}
 
 	# Split an existing pre-release body into label + counter (concatenated form,
 	# e.g. 'alpha0'; a dotted 'alpha.0' is tolerated on input). Stripping the
 	# longest prefix ending in a non-digit leaves the trailing run of digits.
-	CUR_LABEL=""
-	CUR_COUNTER=0
-	if [ -n "$PRE_BODY" ]
+	cur_label=""
+	cur_counter=0
+	if [ -n "$pre_body" ]
 	then
-		counter=${PRE_BODY##*[!0-9]}
+		counter=${pre_body##*[!0-9]}
 		case "$counter" in
 			"")
 				# No trailing counter (e.g. '-alpha'): whole body is the label.
-				CUR_LABEL=$PRE_BODY
-				CUR_COUNTER=0
+				cur_label=$pre_body
+				cur_counter=0
 				;;
 			*)
-				CUR_COUNTER=$counter
-				CUR_LABEL=${PRE_BODY%"$counter"}
-				CUR_LABEL=${CUR_LABEL%[-.]}   # strip any trailing separator
+				cur_counter=$counter
+				cur_label=${pre_body%"$counter"}
+				cur_label=${cur_label%[-.]}   # strip any trailing separator
 				;;
 		esac
 	fi
+
+	println "$major|$minor|$patch|$pre_body|$cur_label|$cur_counter|$meta"
 }
 
 
@@ -475,47 +500,63 @@ parse_version() {
 ### Next-version computation ###
 ################################
 
-# Compute the next pre-release version into NEXT.
+# Return the next pre-release version.
 compute_next_prerelease() {
+	local \
+		major=$1 \
+		minor=$2 \
+		patch=$3 \
+		pre_body=$4 \
+		cur_label=$5 \
+		cur_counter=$6
+
 	if [ -n "$BUMP" ]
 	then
 		# Explicit bump always increments the core and drops any existing
 		# pre-release, then starts the counter at 0.
-		NEXT="$(bump_core_version "$BUMP")-${LABEL}0"
-	elif [ -n "$PRE_BODY" ]
+		println "$(bump_core_version "$BUMP" "$major" "$minor" "$patch")-${LABEL}0"
+	elif [ -n "$pre_body" ]
 	then
 		# No bump on an existing pre-release: increment or switch label.
-		if [ -z "$LABEL" ] || [ "$LABEL" = "$CUR_LABEL" ]
+		if [ -z "$LABEL" ] || [ "$LABEL" = "$cur_label" ]
 		then
-			NEXT="$MAJOR.$MINOR.$PATCH-$CUR_LABEL$((CUR_COUNTER + 1))"
-		elif is_prerelease_downgrade "$LABEL" "$CUR_LABEL"
+			println "$major.$minor.$patch-$cur_label$((cur_counter + 1))"
+		elif is_prerelease_downgrade "$LABEL" "$cur_label"
 		then
-			die "pre-release label '$LABEL' is a downgrade from '$CUR_LABEL'."
+			die "pre-release label '$LABEL' is a downgrade from '$cur_label'."
 		else
-			NEXT="$MAJOR.$MINOR.$PATCH-${LABEL}0"
+			println "$major.$minor.$patch-${LABEL}0"
 		fi
 	else
 		die "'next prerelease' on a non-pre-release version requires a bump level (major|minor|patch)."
 	fi
 }
 
-# Compute the next version into NEXT, based on MODE and the parsed components.
+# Return the next version, based on MODE and the parsed components.
 compute_next() {
+	local \
+		major=$1 \
+		minor=$2 \
+		patch=$3 \
+		pre_body=$4 \
+		cur_label=$5 \
+		cur_counter=$6
+
 	case "$MODE" in
 		major|minor)
-			NEXT=$(bump_core_version "$MODE")
+			bump_core_version "$MODE" "$major" "$minor" "$patch"
 			;;
 		patch)
-			if [ -n "$PRE_BODY" ]
+			if [ -n "$pre_body" ]
 			then
 				# Finalize the in-progress pre-release: drop it, no numeric bump.
-				NEXT="$MAJOR.$MINOR.$PATCH"
+				println "$major.$minor.$patch"
 			else
-				NEXT=$(bump_core_version patch)
+				bump_core_version patch "$major" "$minor" "$patch"
 			fi
 			;;
 		prerelease)
-			compute_next_prerelease
+			compute_next_prerelease "$major" "$minor" "$patch" "$pre_body" "$cur_label" "$cur_counter"
 			;;
 	esac
 }
@@ -525,94 +566,136 @@ compute_next() {
 ### Current build version ###
 #############################
 
-# Append a metadata piece to VERSION, using '+' for the first piece and '-' for
-# subsequent ones. Reads/updates the caller's VERSION and has_metadata via
-# dynamic scoping.
-append_metadata() {
-	if [ "$has_metadata" -eq 0 ]
-	then
-		VERSION="$VERSION+"
-		has_metadata=1
-	else
-		VERSION="$VERSION-"
-	fi
-	VERSION="$VERSION$1"
-}
-
-# Compute the current build version into VERSION by appending commit-count/hash
-# and dirty-tree drift metadata to the base version.
-compute_current() {
+# Return the current build version: the base version with commit-count/hash and
+# dirty-tree drift metadata appended. $1=tag (for the commit count), $2=base
+# version.
+compute_current_build() {
+	local tag=$1
+	local version=$2
 	local commits
 	local short_hash
 	local drift_digest
-	local has_metadata
 
 	# Get the number of commits since the last valid tag.
-	if [ "$TAG" = "0.0.0" ]
+	if [ "$tag" = "0.0.0" ]
 	then
 		commits=$(git rev-list --count --no-merges HEAD)
 	else
-		commits=$(git rev-list --count --no-merges "$TAG..HEAD")
+		commits=$(git rev-list --count --no-merges "$tag..HEAD")
 	fi
 
 	short_hash=$(git rev-parse --short HEAD)
 
-	# If any tracked files have been modified, add a hash of the diff to the
-	# version.
+	# If any tracked files have been modified, hash the current diff.
+	# `git diff HEAD` shows diff between working tree and HEAD so staged files
+	# are included.
 	drift_digest=$(git status --porcelain | perl -ne '/^\s?(M|A|D)/ && ($found=1); END {exit !$found}' && git diff HEAD | sha1)
-
-	# Determine if the version already has metadata.
-	has_metadata=$(printf '%s\n' "$VERSION" | perl -ne '/\+/ && ($found=1); END {exit !$found}' && printf '%s\n' 1 || printf '%s\n' 0)
 
 	# Add commit count and hash to the version if there are any commits since the
 	# last tag. Add the g prefix to the hash to indicate that it is a Git hash,
 	# just like `git describe --tags` does.
 	if [ "$commits" -gt 0 ]
 	then
-		append_metadata "$commits-g$short_hash"
+		version=$(inject_metadata "$version" "$commits-g$short_hash")
 	fi
 
 	# Add a hash of the diff to the version if there are any tracked files that
 	# have been modified.
 	if [ -n "$drift_digest" ]
 	then
-		append_metadata "$drift_digest"
+		version=$(inject_metadata "$version" "$drift_digest")
 	fi
+
+	println "$version"
 }
 
+
+###############
+### History ###
+###############
+
+# List every semver tag that is an ancestor of HEAD, one per line, in
+# topological order.
+list_history() {
+	git log --topo-order --format='%D' HEAD 2>/dev/null \
+		| tr ',' '\n' \
+		| perl -ne 's/^\s*tag: // and print' \
+		| while IFS= read -r tag
+		do
+			if is_semver "$tag"
+			then
+				if [ "$FULL_TAGS" -eq 1 ]
+				then
+					println "$tag"
+				else
+					println "$(strip_prefix "$tag")"
+				fi
+			fi
+		done
+}
 
 ###################
 ### Entry point ###
 ###################
 
 main() {
+	# Set globals from arguments.
 	parse_args "$@"
-	resolve_tag
 
-	# Strip any tolerated prefix from the resolved tag.
-	VERSION=$(strip_prefix "$TAG")
+	if [ "$MODE" = "history" ]
+	then
+		list_history
+		return 0
+	fi
 
-	local output
+	local \
+		tag \
+		version \
+		output
+
+	tag=$(resolve_tag)
+	version=$(strip_prefix "$tag")
+
 	case "$MODE" in
 		# No subcommand: the full current build version.
 		"")
-			compute_current
-			output=$VERSION
+			output=$(compute_current_build "$tag" "$version")
 			;;
 		# Just the nearest semver tag, prefix stripped.
 		base)
-			output=$VERSION
+			output=$version
 			;;
 		# A `next` release/pre-release version, preserving the tag's prefix.
 		major|minor|patch|prerelease)
-			PREFIX=$(tolerated_prefix "$TAG")
-			parse_version "$VERSION"
-			compute_next
-			output="$PREFIX$NEXT"
+			local \
+				prefix \
+				major \
+				minor \
+				patch \
+				pre_body \
+				cur_label \
+				cur_counter \
+				meta \
+				next
+			prefix=$(tolerated_prefix "$tag")
+
+			# Parse version parts and bind to local variables.
+			IFS='|' read -r major minor patch pre_body cur_label cur_counter meta <<-HERE
+			$(parse_version "$version")
+			HERE
+
+			# No major version means the whole version is unparsable.
+			if [ -z "$major" ]
+			then
+				die "base version '$version' is not a parseable semantic version."
+			fi
+
+			next=$(compute_next "$major" "$minor" "$patch" "$pre_body" "$cur_label" "$cur_counter") || exit 1
+			output="$prefix$next"
 			# Re-attach the tag's build metadata when asked to preserve it.
 			if [ "$PRESERVE_METADATA" -eq 1 ]
 			then
-				output="$output$META"
+				output="$output$meta"
 			fi
 			;;
 		*)

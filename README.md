@@ -1,7 +1,7 @@
 # Git SemVer Compute
 
 A simple script to use in your projects to calculcate a
-[Semantic Versioning](https://semver.org/) (sem-ver) compliant verion 
+[Semantic Versioning](https://semver.org/) (sem-ver) compliant verion
 identifier based on Git Tags and Commits.
 
 ## Dependencies
@@ -90,6 +90,91 @@ back to `0.0.0`.
 ```
 base v1.2.3   calculate-version.sh base -> 1.2.3
 no tags       calculate-version.sh base -> 0.0.0
+```
+
+### Tag History
+
+Passing the `history` subcommand prints every semver tag that is an ancestor of
+the current ref, one per line, in topological order (*newest* first). Tags on
+other branches are excluded and non-semver tags are skipped; `--tolerate-prefix`
+governs what counts as a semver tag. Each tag is printed prefix-stripped (like
+`base`) by default, or as the raw tag name with `--full-tags`.
+
+```
+$ calculate-version.sh history
+4.0.0
+2.1.0+build.99
+2.0.0-rc1
+1.2.3
+
+$ calculate-version.sh history --full-tags
+V4.0.0
+2.1.0+build.99
+2.0.0-rc1
+v1.2.3
+```
+
+#### Newest vs Nearest
+
+`history` answers a different question than `base` and `next`. It is a
+*topological* (newest-first) listing: it walks parents from `HEAD` and reports
+every ancestor semver tag in the order encountered.
+`base` (and `next`, and the default build version) instead resolve the
+*distance-nearest* release: the semver tag with the fewest commits between it
+and `HEAD`, exactly what `git describe` reports.
+Since `base` is the minimum-distance tag by definition, `history`'s first line
+can only tie or be farther, so the two agree on linear history
+(`base` equals the first line) and split only at a **merge**,
+where `--topo-order` descends the **newer-dated** parent first rather than the
+nearest one; if that side carries the farther tag, they disagree.
+This is intentional: the build anchor should be the release you are closest to,
+while `history` is the *timeline* of tags.
+
+Linear history, always agree:
+
+```
+  ●──────●───────●───────●   ← HEAD
+  R      A1      A2      A3
+         └ 1.0.0 └ 2.0.0
+                   └ nearest, and first in the walk
+
+  base = 2.0.0        history = 2.0.0, 1.0.0     ✓ agree
+```
+
+Merge where the newer side carries the *farther* tag, they disagree:
+
+```
+   topo walks feature first (F1 is newer-dated) ─┐
+                                                 ▼
+  feature   ●──────────────●  F1 — tag 1.5.0   (dist 3)  ← history[0]
+           ╱                 ╲
+  main ●───●───●────●────●────●  M = HEAD
+       R   B1  B2   B3    B4   (merge)
+                    └ tag 2.0.0  (dist 2)                 ← base
+
+  base = 2.0.0     history = 1.5.0, 2.0.0        ✗ disagree
+```
+
+Here `base` takes the distance-2 tag, `2.0.0`. But the newest-first walk
+(performed by `history`) enters the `feature` side first
+(because `F1` is newer than `B3`) and emits `1.5.0`
+(which is technically three commits back, since its one commit remove from B1)
+before it ever reaches `2.0.0`. A merge does not *always* split the two:
+if the newer-dated branch happens to carry the nearer tag, the newest tag and
+the nearest tag are the same one.
+
+Merge where the newer side carries the *nearer* tag, they agree:
+
+```
+   topo walks feature first (F1 is newer-dated) ─┐
+                                                 ▼
+  feature         ●───────●  F1 — tag 2.0.0  (dist 2)  ← history[0] = base
+                 ╱         ╲
+  main ●───●───●───●───────●  M = HEAD
+       R   C1  C2  C3    (merge)
+           └ tag 1.5.0  (dist 4)
+
+  base = 2.0.0     history = 2.0.0, 1.5.0        ✓ agree
 ```
 
 ### Computing the Next Version
@@ -229,6 +314,6 @@ calculate-version.sh --preserve-metadata next patch --add-metadata=ci42
   -> 1.2.4+build.5-ci42
 ```
 
-Both `--add-metadata=META` and `--add-metadata META` are accepted; an empty 
+Both `--add-metadata=META` and `--add-metadata META` are accepted; an empty
 value is a no-op.
 
