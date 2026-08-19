@@ -58,6 +58,40 @@ usage() {
 	println "Usage: $(basename "$0") [--tolerate-prefix=LIST] [--oci[=SEP]] [--preserve-metadata] [--add-metadata=META] [--full-tags] [next major|minor|patch|prerelease [bump] [label] | base | history]"
 }
 
+# Print the usage line plus a detailed description of the subcommands and options.
+help() {
+	usage
+	cat <<-HERE
+
+	Compute a Semantic Version compliant version from git tags and commits.
+	With no subcommand it prints the current build version: the nearest semver
+	tag plus the commit distance and short hash, and a drift digest when tracked
+	files are dirty (e.g. 4.0.0+3-gb69b243).
+
+	Subcommands:
+	  (none)                          Current build version (described above).
+	  base                            Nearest semver tag only; prefix stripped and
+	                                  no metadata. Falls back to 0.0.0.
+	  next major|minor|patch          Next release version from the nearest tag.
+	  next prerelease [bump] [label]  Next pre-release version. bump is one of
+	                                  major|minor|patch; label is any pre-release
+	                                  label (alpha, beta, rc, ...) or empty for -0.
+	  history [--full-tags]           Every ancestor semver tag, newest first.
+	                                  --full-tags prints raw tag names
+	                                  (not prefix-stripped).
+
+	Options:
+	  --tolerate-prefix[=LIST]  Comma-separated prefixes tolerated before a tag
+	                            (default 'v'); an empty list tolerates none.
+	  --oci[=SEP]               Replace '+' in the output with SEP (default '_')
+	                            for OCI-compatible image tags.
+	  --preserve-metadata       Carry the tag's +build metadata onto next output.
+	  --add-metadata=META       Append META to the output's build metadata.
+	  --full-tags               See history command above for details.
+	  -h, --help                Show this help and exit.
+	HERE
+}
+
 usage_err() {
 	usage >&2
 }
@@ -245,6 +279,10 @@ parse_args() {
 	while [ "$1" != "$sentinel" ]
 	do
 		case "$1" in
+			-h|--help)
+				help
+				exit 0
+				;;
 			--tolerate-prefix=*)
 				TOLERATE_PREFIX=${1#--tolerate-prefix=}
 				shift
