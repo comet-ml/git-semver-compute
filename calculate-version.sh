@@ -36,6 +36,13 @@ ADD_METADATA=""
 # (prefix and metadata intact) instead of prefix-stripped versions.
 FULL_TAGS=0
 
+# When --sort is used, the `history` subcommand orders its output by semantic
+# version (highest first) instead of git topological order. Build metadata is
+# ignored for ordering.
+# (https://web.archive.org/web/20221230095605/https://semver.org/#spec-item-10)
+# Tags with equal precedence keep their encounter order.
+SORT=0
+
 ###############
 ### Helpers ###
 ###############
@@ -55,7 +62,7 @@ println_err() {
 }
 
 usage() {
-	println "Usage: $(basename "$0") [--tolerate-prefix=LIST] [--oci[=SEP]] [--preserve-metadata] [--add-metadata=META] [--full-tags] [next major|minor|patch|prerelease [bump] [label] | base | history]"
+	println "Usage: $(basename "$0") [--tolerate-prefix=LIST] [--oci[=SEP]] [--preserve-metadata] [--add-metadata=META] [next major|minor|patch|prerelease [bump] [label] | base | history [--full-tags] [--sort]]"
 }
 
 # Print the usage line plus a detailed description of the subcommands and options.
@@ -76,9 +83,8 @@ help() {
 	  next prerelease [bump] [label]  Next pre-release version. bump is one of
 	                                  major|minor|patch; label is any pre-release
 	                                  label (alpha, beta, rc, ...) or empty for -0.
-	  history [--full-tags]           Every ancestor semver tag, newest first.
-	                                  --full-tags prints raw tag names
-	                                  (not prefix-stripped).
+	  history [--full-tags] [--sort]  Every ancestor semver tag, newest first.
+	                                  See below for flag details.
 
 	Options:
 	  --tolerate-prefix[=LIST]  Comma-separated prefixes tolerated before a tag
@@ -87,7 +93,13 @@ help() {
 	                            for OCI-compatible image tags.
 	  --preserve-metadata       Carry the tag's +build metadata onto next output.
 	  --add-metadata=META       Append META to the output's build metadata.
-	  --full-tags               See history command above for details.
+
+	  --full-tags               When printing history, show full-tags.
+	  --sort                    Order history output by semantic version
+	                            (highest first). Build metadata is ignored for
+	                            ordering; combine with --full-tags to sort raw
+	                            tag names by their semantic version component.
+
 	  -h, --help                Show this help and exit.
 	HERE
 }
@@ -325,6 +337,10 @@ parse_args() {
 				;;
 			--full-tags)
 				FULL_TAGS=1
+				shift
+				;;
+			--sort)
+				SORT=1
 				shift
 				;;
 			*)
@@ -662,7 +678,20 @@ list_history() {
 		do
 			if is_semver "$tag"
 			then
-				if [ "$FULL_TAGS" -eq 1 ]
+				if [ "$SORT" -eq 1 ]
+				then
+					# Return two columns to aid in sorting:
+					# First column is the version to be compared, and the second column
+					# is the text to display.
+					# (either the stripped version or the full tag)
+					stripped=$(strip_prefix "$tag")
+					if [ "$FULL_TAGS" -eq 1 ]
+					then
+						printf '%s\t%s\n' "$stripped" "$tag"
+					else
+						printf '%s\t%s\n' "$stripped" "$stripped"
+					fi
+				elif [ "$FULL_TAGS" -eq 1 ]
 				then
 					println "$tag"
 				else
@@ -670,6 +699,126 @@ list_history() {
 				fi
 			fi
 		done
+}
+
+# Read "<ver>\t<tag>" rows on stdin and return the tag column ordered by
+# the semantic version precedence of the first column.
+# (https://web.archive.org/web/20221230095605/https://semver.org/#spec-item-11).
+# Build metadata is ignored and equal vers keep their input order.
+# (https://web.archive.org/web/20221230095605/https://semver.org/#spec-item-10).
+# Descending by default.
+sort_tags_by_semver() {
+	local perl_prog
+	# Use quoted HERE Doc delimiter to avoid internal shell expansion.
+	# <<- to strip leading indentation.
+	perl_prog=$(cat <<-'PERL'
+		my $re = $ENV{SEMVER_REGEX};
+		# Default to descending.
+		my $dir = $ENV{DIRECTION} || -1;
+
+		# Compare two dot-separated pre-release identifiers.
+		# (https://web.archive.org/web/20221230095605/https://semver.org/#spec-item-11)
+		sub id_cmp {
+			# Two components (strings) are passed in.
+			my ($x, $y) = @_;
+
+			my $x_is_num = $x =~ /^[0-9]+$/;
+			my $y_is_num = $y =~ /^[0-9]+$/;
+
+			# If both are numeric, do a numeric comparison.
+			return $x <=> $y if $x_is_num && $y_is_num;
+			# Numeric values are smaller than alphanumeric ones, so if they both
+			# are not numeric but the first one is, then the first is smaller.
+			return -1 if $x_is_num;
+			# And the inverse.
+			return  1 if $y_is_num;
+			# If both are alphanumeric, then ASCII compare.
+			return $x cmp $y;
+		}
+		# Compare two pre-release identifier lists.
+		sub pre_cmp {
+			# Two lists of pre-release components are passed in.
+			my ($x, $y) = @_;
+
+			# Return 'equal' if both are empty lists.
+			return  0 if !@$x && !@$y;        # neither has a pre-release
+			# First arg has no pre-release, so it has higher precedence.
+			return  1 if !@$x;
+			# Second arg has no pre-release, so it has higher precedence.
+			return -1 if !@$y;
+
+			# Store shorter pre-release list count in $n to avoid over-running the
+			# longer list when comparing.
+			my $n = @$x < @$y ? @$x : @$y;
+			# For range over the indexes of the shorter list.
+			for my $k (0 .. $n - 1) {
+				# Compare each pre-release component.
+				my $c = id_cmp($x->[$k], $y->[$k]);
+				# Return the result of id_cmp if any around to not match.
+				# 1 if the component of the first arg was greater, -1 otherwise.
+				# Don't return if equal (0)
+				return $c if $c
+			}
+			# If every overlapping element matches, then the longest one is greater.
+			return @$x <=> @$y;
+		}
+		sub sv_cmp {
+			# Two row records are passed in.
+			my ($x, $y) = @_;
+
+			# Evaluate each part of the record against each part of the other's
+			# (except the index), to determine if one is larger than the other.
+			$x->{maj} <=> $y->{maj} || $x->{min} <=> $y->{min}
+				|| $x->{pat} <=> $y->{pat} || pre_cmp($x->{pre}, $y->{pre});
+		}
+
+		# @rows initialized as empty, and $i as undefined.
+		# $i++ later will implicitly collapse it to an int of 0 (before
+		# incrementing) so no need to initialize.
+		my (@rows, $i);
+
+		# Read one line (<STDIN> readline operator) into $line scalar.
+		# Wrap in defined() to prevent while evaluating the line itself for
+		# truthiness.
+		while (defined(my $line = <STDIN>)) {
+			chomp $line;
+			# Split the row into ver (the sort version) and tag (the display form:
+			# either the full tag or just the bare version).
+			my ($ver, $tag) = split /\t/, $line, 2;
+			my ($maj, $min, $pat, @pre);
+			if (defined $ver && $ver =~ /$re/) {
+				# Bind capture groups to variables.
+				($maj, $min, $pat) = ($+{major}, $+{minor}, $+{patch});
+				# If pre-release section exists, split it on . and store in array.
+				# Check if defined() to accept '0' prerelease.
+				@pre = defined $+{prerelease} ? split(/\./, $+{prerelease}) : ();
+				# $+{buildmetadata} intentionally ignored.
+				# (https://web.archive.org/web/20221230095605/https://semver.org/#spec-item-10)
+			}
+			# Push record onto rows, with decomposed parts of the semver, along with
+			# an index to preserve the original order for later tie-breaking.
+			push @rows, {
+				i => $i++,
+				tag => $tag,
+				maj => $maj,
+				min => $min,
+				pat => $pat,
+				pre => [@pre],
+			};
+		}
+
+		# The index tiebreak makes stability explicit (Perl sort is not
+		# guaranteed stable) and stays ascending, so equal versions keep encounter
+		# order in both sort directions.
+		print $_->{tag}, "\n" for sort {
+			# Comparator evaluates which of the two is greater (with $dir ajusting
+			# sort order), or if they are considered identical, it returns whichever
+			# has the higher index.
+			$dir * sv_cmp($a, $b) || -$dir * ($a->{i} <=> $b->{i})
+		} @rows;
+	PERL
+	)
+	SEMVER_REGEX="$SEMVER_REGEX" perl -e "$perl_prog"
 }
 
 ###################
@@ -682,7 +831,12 @@ main() {
 
 	if [ "$MODE" = "history" ]
 	then
-		list_history
+		if [ "$SORT" -eq 1 ]
+		then
+			list_history | sort_tags_by_semver
+		else
+			list_history
+		fi
 		return 0
 	fi
 

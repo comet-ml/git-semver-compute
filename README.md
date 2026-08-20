@@ -176,6 +176,23 @@ Merge where the newer side carries the *nearer* tag, they agree:
 
   base = 2.0.0     history = 2.0.0, 1.5.0        ✓ agree
 ```
+#### Sorting History
+
+Add `--sort` to order the history by **semantic version** (highest first)
+instead of topological order. Build metadata is ignored (so `2.1.0+build.99`
+sorts with the same precedence as `2.1.0`)
+Tags whose stripped versions are equal keep their topological order.
+
+`--sort` combines with `--full-tags` to allow the sorting of the raw tag names
+by their semantic version components.
+
+```
+$ calculate-version.sh history --sort --full-tags
+V4.0.0
+2.1.0+build.99
+2.0.0-rc1
+v1.2.3
+```
 
 ### Computing the Next Version
 
