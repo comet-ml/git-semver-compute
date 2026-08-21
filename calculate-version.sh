@@ -18,8 +18,9 @@ SEMVER_REGEX='^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d
 TOLERATE_PREFIX="v"
 
 # When --oci is used, the '+' build-metadata separator (which OCI image tags
-# disallow) is replaced in the output. OCI_PLUS is the replacement string,
-# defaulting to '_' and overridable via --oci=SEP (e.g. --oci=--).
+# disallow) is replaced in all output.
+# OCI_PLUS is the replacement string, defaulting to '_' and can be overridden
+# via --oci=SEP (e.g. --oci=--).
 OCI_MODE=0
 OCI_PLUS="_"
 
@@ -36,12 +37,28 @@ ADD_METADATA=""
 # (prefix and metadata intact) instead of prefix-stripped versions.
 FULL_TAGS=0
 
-# When --sort is used, the `history` subcommand orders its output by semantic
-# version (highest first) instead of git topological order. Build metadata is
-# ignored for ordering.
+# When --sort is used on the `history` subcommand, its output is ordered by
+# semantic version (highest first) instead of git topological order.
+# Build metadata is ignored for ordering.
 # (https://web.archive.org/web/20221230095605/https://semver.org/#spec-item-10)
 # Tags with equal precedence keep their encounter order.
 SORT=0
+
+# When --dirty is used with the `sort` subcommand, non-semver lines piped over
+# stdin are skipped instead of being a fatal error.
+DIRTY=0
+
+# When --ascending (or --asc) is used with a sort, output is ordered with the
+# lowest version first instead of the default highest-first (descending).
+ASCENDING=0
+
+# When --base-override=VER is used, VER is treated as the base version instead
+# of resolving one from git tags (this short-circuits resolve_tag).
+# VER must be a valid semver. A tolerated prefix is accepted and preserved like
+# a real tag.
+# Only meaningful for `base` and `next`. Errors for the build version and
+# `history`.
+BASE_OVERRIDE=""
 
 ###############
 ### Helpers ###
@@ -62,7 +79,7 @@ println_err() {
 }
 
 usage() {
-	println "Usage: $(basename "$0") [--tolerate-prefix=LIST] [--oci[=SEP]] [--preserve-metadata] [--add-metadata=META] [next major|minor|patch|prerelease [bump] [label] | base | history [--full-tags] [--sort]]"
+	println "Usage: $(basename "$0") [--tolerate-prefix=LIST] [--oci[=SEP]] [--preserve-metadata] [--add-metadata=META] [--base-override=VER] [next major|minor|patch|prerelease [bump] [label] | base | history [--full-tags] [--sort] [--ascending] | sort [--dirty] [--full-tags] [--ascending] < versions]"
 }
 
 # Print the usage line plus a detailed description of the subcommands and options.
@@ -85,22 +102,42 @@ help() {
 	                                  label (alpha, beta, rc, ...) or empty for -0.
 	  history [--full-tags] [--sort]  Every ancestor semver tag, newest first.
 	                                  See below for flag details.
+	  sort [--dirty] < versions       Read versions on STDIN and print them in
+	                                  descending semantic version order.
+	                                  Defaults to erroring if, after stripping
+	                                  tolerated prefixes, a line does not contain
+	                                  a valid semantic version.
+	                                  See below for flag details.
 
-	Options:
+	Shared Options:
 	  --tolerate-prefix[=LIST]  Comma-separated prefixes tolerated before a tag
 	                            (default 'v'); an empty list tolerates none.
-	  --oci[=SEP]               Replace '+' in the output with SEP (default '_')
-	                            for OCI-compatible image tags.
-	  --preserve-metadata       Carry the tag's +build metadata onto next output.
-	  --add-metadata=META       Append META to the output's build metadata.
-
-	  --full-tags               When printing history, show full-tags.
-	  --sort                    Order history output by semantic version
-	                            (highest first). Build metadata is ignored for
-	                            ordering; combine with --full-tags to sort raw
-	                            tag names by their semantic version component.
-
+	  --oci[=SEP]               Replace '+' in all output with SEP (default '_')
+	                            for OCI-compatible image tags (in any mode).
 	  -h, --help                Show this help and exit.
+
+	Version Generation Options:
+	  --preserve-metadata       Carry the prior tag's +build metadata onto the
+	                            next output.
+	  --add-metadata=META       Append META to the output's build metadata.
+	  --base-override=VER       Use VER as the base version instead of resolving
+	                            one from git tags. Computes 'next' relative to VER
+	                            and 'base' echoes it. VER must be a valid semver.
+
+	History Options:
+	  --sort                    Sort by semantic version (highest version first)
+	                            instead of topological order. Build metadata is
+	                            ignored for ordering.
+	                            Combine with --full-tags to sort raw tag names by
+	                            their semantic version component.
+	  --ascending, --asc        Sort ascending (lowest version first).
+	  --full-tags               Show full non-prefix-stripped versions/tags.
+
+	Sort Options:
+	  --dirty                   Skip (rather than error on) non-semver lines.
+	  --ascending, --asc        Sort ascending (lowest version first).
+	  --full-tags               Show full non-prefix-stripped versions/tags.
+	                            (After sorting on semantic version components)
 	HERE
 }
 
@@ -133,11 +170,13 @@ die() {
 tolerated_prefix() {
 	local \
 		tag=$1 \
+		tag_lower \
 		best="" \
 		prefix_list=$TOLERATE_PREFIX \
-		tag_lower=$(print "$tag" | tr '[:upper:]' '[:lower:]') \
 		prefix \
 		prefix_lower
+
+	tag_lower=$(print "$tag" | tr '[:upper:]' '[:lower:]')
 
 	while [ -n "$prefix_list" ]
 	do
@@ -190,18 +229,30 @@ is_semver() {
 	println "$(strip_prefix "$1")" | perl -ne "/$SEMVER_REGEX/ && (\$found=1); END {exit !\$found}"
 }
 
-# Return the input with every '+' replaced by OCI_PLUS, for OCI-tag-compatible
-# output (OCI image tags disallow '+').
-oci_encode() {
-	local in=$1
-	local out=""
-
-	while [ "$in" != "${in#*+}" ]
+# Line filter for list output (history, sort): OCI-encode each line when --oci
+# is active, otherwise pass it through untouched. Only the lines that actually
+# contain '+' are re-encoded.
+oci_filter() {
+	local line
+	while IFS= read -r line
 	do
-		out="$out${in%%+*}$OCI_PLUS"
-		in=${in#*+}
+		if [ "$OCI_MODE" -eq 1 ]
+		then
+			case "$line" in
+				*+*)
+					local in="$line"
+					local out=""
+					while [ "$in" != "${in#*+}" ]
+					do
+						out="$out${in%%+*}$OCI_PLUS"
+						in=${in#*+}
+					done
+					line="$out$in"
+					;;
+			esac
+		fi
+		println "$line"
 	done
-	print "$out$in"
 }
 
 # Return $1 with build metadata $2 attached: start a '+' section if there is
@@ -209,8 +260,12 @@ oci_encode() {
 # build-version metadata).
 inject_metadata() {
 	case "$1" in
-		*+*) print "$1-$2" ;;
-		*)   print "$1+$2" ;;
+		*+*)
+			print "$1-$2"
+			;;
+		*)
+			print "$1+$2"
+			;;
 	esac
 }
 
@@ -343,6 +398,27 @@ parse_args() {
 				SORT=1
 				shift
 				;;
+			--dirty)
+				DIRTY=1
+				shift
+				;;
+			--ascending|--asc)
+				ASCENDING=1
+				shift
+				;;
+			--base-override=*)
+				BASE_OVERRIDE=${1#--base-override=}
+				shift
+				;;
+			--base-override)
+				shift  # Grab the next arg
+				if [ "$1" = "$sentinel" ]
+				then
+					die_usage "--base-override requires a value."
+				fi
+				BASE_OVERRIDE=$1
+				shift
+				;;
 			*)
 				# Found something that is not a known non-positional arg.
 				# Rotate it to the end of the args (after the sentinel).
@@ -376,6 +452,15 @@ parse_args() {
 			if [ -n "$2" ]
 			then
 				die_usage "'history' takes no extra arguments."
+			fi
+			;;
+		### Sort ###
+		# Sort a list of versions read from stdin
+		sort)
+			MODE="sort"
+			if [ -n "$2" ]
+			then
+				die_usage "'sort' takes no extra arguments."
 			fi
 			;;
 		### Next ###
@@ -668,6 +753,21 @@ compute_current_build() {
 ### History ###
 ###############
 
+# Return a "<stripped-version>\t<display>" sort row for one semver tag/line.
+# Used to prepare input to sort_tags_by_semver.
+# The first column is the stripped version; the display column is the full
+# input under --full-tags, and the same stripped stripped version otherwise.
+get_sort_row() {
+	local stripped
+	stripped=$(strip_prefix "$1")
+	if [ "$FULL_TAGS" -eq 1 ]
+	then
+		printf '%s\t%s\n' "$stripped" "$1"
+	else
+		printf '%s\t%s\n' "$stripped" "$stripped"
+	fi
+}
+
 # List every semver tag that is an ancestor of HEAD, one per line, in
 # topological order.
 list_history() {
@@ -680,17 +780,7 @@ list_history() {
 			then
 				if [ "$SORT" -eq 1 ]
 				then
-					# Return two columns to aid in sorting:
-					# First column is the version to be compared, and the second column
-					# is the text to display.
-					# (either the stripped version or the full tag)
-					stripped=$(strip_prefix "$tag")
-					if [ "$FULL_TAGS" -eq 1 ]
-					then
-						printf '%s\t%s\n' "$stripped" "$tag"
-					else
-						printf '%s\t%s\n' "$stripped" "$stripped"
-					fi
+					get_sort_row "$tag"
 				elif [ "$FULL_TAGS" -eq 1 ]
 				then
 					println "$tag"
@@ -701,14 +791,34 @@ list_history() {
 		done
 }
 
+# Read versions from stdin (one per line) and return prepared sort rows for
+# consumption by sort_tags_by_semver. Empty lines are skipped.
+# A non-semver line is skipped when DIRTY=1, otherwise throws an error.
+read_stdin_versions() {
+	local line
+	while IFS= read -r line
+	do
+		if [ -z "$line" ]
+		then
+			continue
+		fi
+		if is_semver "$line"
+		then
+			get_sort_row "$line"
+		elif [ "$DIRTY" -eq 0 ]
+		then
+			die "not a valid semantic version: '$line'"
+		fi
+	done
+}
+
 # Read "<ver>\t<tag>" rows on stdin and return the tag column ordered by
 # the semantic version precedence of the first column.
 # (https://web.archive.org/web/20221230095605/https://semver.org/#spec-item-11).
-# Build metadata is ignored and equal vers keep their input order.
+# Build metadata is ignored for precedence.
 # (https://web.archive.org/web/20221230095605/https://semver.org/#spec-item-10).
-# Descending by default.
 sort_tags_by_semver() {
-	local perl_prog
+	local perl_prog direction
 	# Use quoted HERE Doc delimiter to avoid internal shell expansion.
 	# <<- to strip leading indentation.
 	perl_prog=$(cat <<-'PERL'
@@ -808,8 +918,8 @@ sort_tags_by_semver() {
 		}
 
 		# The index tiebreak makes stability explicit (Perl sort is not
-		# guaranteed stable) and stays ascending, so equal versions keep encounter
-		# order in both sort directions.
+		# guaranteed stable). Multiplying it by -$dir makes ties follow encounter
+		# order when descending, and reverse-encounter order when ascending.
 		print $_->{tag}, "\n" for sort {
 			# Comparator evaluates which of the two is greater (with $dir ajusting
 			# sort order), or if they are considered identical, it returns whichever
@@ -818,7 +928,9 @@ sort_tags_by_semver() {
 		} @rows;
 	PERL
 	)
-	SEMVER_REGEX="$SEMVER_REGEX" perl -e "$perl_prog"
+	SEMVER_REGEX="$SEMVER_REGEX" \
+		DIRECTION="$([ "$ASCENDING" -eq 1 ] && print "1" || print "-1")" \
+		perl -e "$perl_prog"
 }
 
 ###################
@@ -829,14 +941,43 @@ main() {
 	# Set globals from arguments.
 	parse_args "$@"
 
+	# --base-override short-circuits tag resolution; reject the modes it cannot
+	# serve before doing any work, then validate the override itself.
+	if [ -n "$BASE_OVERRIDE" ]
+	then
+		case "$MODE" in
+			"")
+				die "the current build version cannot be computed with --base-override."
+				;;
+			history)
+				die "--base-override cannot be combined with 'history'."
+				;;
+			sort)
+				die "--base-override cannot be combined with 'sort'."
+				;;
+		esac
+		if ! is_semver "$BASE_OVERRIDE"
+		then
+			die "base override '$BASE_OVERRIDE' is not a valid semantic version."
+		fi
+	fi
+
 	if [ "$MODE" = "history" ]
 	then
 		if [ "$SORT" -eq 1 ]
 		then
-			list_history | sort_tags_by_semver
+			list_history | sort_tags_by_semver | oci_filter
 		else
-			list_history
+			list_history | oci_filter
 		fi
+		return 0
+	fi
+
+	if [ "$MODE" = "sort" ]
+	then
+		local rows
+		rows=$(read_stdin_versions) || exit 1
+		print "$rows" | sort_tags_by_semver | oci_filter
 		return 0
 	fi
 
@@ -845,7 +986,12 @@ main() {
 		version \
 		output
 
-	tag=$(resolve_tag)
+	if [ -n "$BASE_OVERRIDE" ]
+	then
+		tag=$BASE_OVERRIDE
+	else
+		tag=$(resolve_tag)
+	fi
 	version=$(strip_prefix "$tag")
 
 	case "$MODE" in
@@ -902,12 +1048,7 @@ main() {
 		output=$(inject_metadata "$output" "$ADD_METADATA")
 	fi
 
-	# Convert '+' to an OCI-tag-compatible separator when requested.
-	if [ "$OCI_MODE" -eq 1 ]
-	then
-		output=$(oci_encode "$output")
-	fi
-	print "$output"
+	println "$output" | oci_filter
 }
 
 main "$@"
